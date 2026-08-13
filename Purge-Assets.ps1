@@ -5,6 +5,7 @@ $QualysUsername = "<qualys-api-username>"
 $QualysPlatform = "<qualysapi.qualys.com?"
 $SecretPath = "<path-to-secret-enc>"
 
+# Path to your text file containing one Asset ID per line
 $TxtFilePath = "$PSScriptRoot\AssetIDs.txt"
 
 # --- READ FILE & VERIFY ---
@@ -12,6 +13,7 @@ if (-not (Test-Path $TxtFilePath)) {
     Throw "Error: Could not find $TxtFilePath. Please make sure the file exists in this directory."
 }
 
+# Read non-empty lines into an array
 $TargetAssetIds = Get-Content -Path $TxtFilePath | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
 
 Write-Host "[LOADED] Found $($TargetAssetIds.Count) Asset IDs in $TxtFilePath" -ForegroundColor Cyan
@@ -38,7 +40,7 @@ $Headers = @{
 }
 
 $SearchURL = "https://$QualysPlatform/qps/rest/2.0/search/am/asset"
-$PurgeURL  = "https://$QualysPlatform/api/2.0/fo/asset/host/"
+$PurgeURL  = "https://$QualysPlatform/qps/rest/2.0/delete/am/asset/"
 
 # --- PROCESS ASSET IDs ---
 Write-Host "=========================================================" -ForegroundColor Cyan
@@ -74,17 +76,15 @@ foreach ($AssetId in $TargetAssetIds) {
             if ([string]::IsNullOrWhiteSpace($AgentId)) {
                 Write-Host " -> Agent ID: NONE. Safe to purge. Executing purge..." -ForegroundColor Yellow
 
-                # Construct Purge Payload for API v2 (Host Asset API)
-                $PurgeBody = @{
-                    "action"   = "purge"
-                    "ids"      = $CleanId
-                }
+                # Correct Purge Payload for AM Asset API
+                $PurgePayload = "<ServiceRequest><filters><Criteria field=`"id`" operator=`"EQUALS`">$CleanId</Criteria></filters></ServiceRequest>"
 
                 try {
                     $PurgeResponse = Invoke-WebRequest -Uri $PurgeURL `
                                                        -Method "Post" `
                                                        -Headers $Headers `
-                                                       -Body $PurgeBody `
+                                                       -ContentType "text/xml" `
+                                                       -Body $PurgePayload `
                                                        -ErrorAction Stop
 
                     Write-Host " [SUCCESS] Asset ID $CleanId successfully purged from Qualys!" -ForegroundColor Green
