@@ -4,7 +4,10 @@
 Initialize a password associated with the current user for secure connections to Qualys API. 
 
 ### [`Get-QualysAsset.ps1`](Get-QualysAsset.ps1)
-Get Qualys Asset.
+Get Qualys Asset by name.
 
-### [`Purge-Assets.ps1`](Purge-Assets.ps1)
-Takes a list of Asset IDs and purges them in Qualys (for purging duplicates without Cloud Agents).
+### [`Get-Duplicates.ps1`](Get-Duplicates.ps1)
+Takes a Qualys export csv ```export.csv``` and parses it to find all (non-Cloud Agent) duplicates. 
+
+### [`Purge-Duplicates.ps1`](Purge-Duplicates.ps1)
+Uses ```Get-Duplicates.ps1``` and purges all duplicate (non-Cloud Agent) assets. 
