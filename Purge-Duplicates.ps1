@@ -4,21 +4,28 @@
 $QualysUsername = "<qualys-api-username>"
 $QualysPlatform = "<qualysapi.qualys.com?"
 $SecretPath = "<path-to-secret-enc>"
-$ParserScript   = "$PSScriptRoot\Get-Duplicates.ps1"
+$ParserScript   = "$PSScriptRoot\Parse-Duplicates.ps1"
+$RandomizeOrder = $true  
 
 # --- IMPORT PARSER FUNCTION ---
 if (-not (Test-Path $ParserScript)) {
     Throw "Error: Missing dependency $ParserScript."
 }
-. $ParserScript # Dot-source Get-Duplicates.ps1
+. $ParserScript # Dot-source Parse-Duplicates.ps1
 
-# --- RUN PARSER TO GET FILTERED CANDIDATES ---
-$TargetsToPurge = Get-Duplicates
+# --- RUN PARSER TO GET CANDIDATES ---
+$TargetsToPurge = Parse-Duplicates
 $TotalCount     = $TargetsToPurge.Count
 
 if ($TotalCount -eq 0) {
     Write-Host "[FINISHED] No valid purge candidates found. Exiting." -ForegroundColor Yellow
     exit
+}
+
+# --- SHUFFLE LIST IN MAIN SCRIPT IF ENABLED ---
+if ($RandomizeOrder) {
+    Write-Host "[RANDOMIZING] Shuffling list order..." -ForegroundColor Yellow
+    $TargetsToPurge = $TargetsToPurge | Get-Random -Count $TotalCount
 }
 
 # --- LOAD CREDENTIALS ---
@@ -42,84 +49,72 @@ $Headers = @{
     'X-Requested-With' = "QualysAutomation"
 }
 
-$VmHostInfoURL = "https://$QualysPlatform/api/2.0/fo/asset/host/"
-$VmPurgeURL    = "https://$QualysPlatform/api/2.0/fo/asset/host/"
-$AmDeleteURL   = "https://$QualysPlatform/qps/rest/2.0/delete/am/asset/"
+$AmSearchURL = "https://$QualysPlatform/qps/rest/2.0/search/am/asset"
+$AmDeleteURL = "https://$QualysPlatform/qps/rest/2.0/delete/am/asset/"
 
 # --- PROCESS PURGES ---
 Write-Host "=========================================================" -ForegroundColor Cyan
-Write-Host "STARTING EXECUTION FOR $TotalCount EXACT DUPLICATE CANDIDATES" -ForegroundColor Cyan
+Write-Host "STARTING EXECUTION FOR $TotalCount CANDIDATES (SHUFFLED: $RandomizeOrder)" -ForegroundColor Cyan
 Write-Host "=========================================================`n" -ForegroundColor Cyan
 
-$CurrentLine = 0
+$CurrentProgress = 0
 
 foreach ($Target in $TargetsToPurge) {
-    $CurrentLine++
-    $AssetId = $Target.AssetID
-    $HostId  = $Target.HostID
-    $Name    = $Target.AssetName
+    $CurrentProgress++
+    $OrigIndex = $Target.OriginalIndex
+    $AssetId   = $Target.AssetID
+    $HostId    = $Target.HostID
+    $Name      = $Target.AssetName
 
-    # PATH A: Direct VM Host ID Purge
-    if (-not [string]::IsNullOrWhiteSpace($HostId)) {
-        Write-Host "[$CurrentLine/$TotalCount] Target: $Name (Asset ID: $AssetId | Host ID: $HostId)" -ForegroundColor Green
-        
-        # -------------------------------------------------------------------
-        # REAL-TIME API DOUBLE CHECK: Verify Host ID has no agent live in Qualys
-        # -------------------------------------------------------------------
-        Write-Host " -> Verifying live Agent status via API for Host ID $HostId..." -ForegroundColor Gray
-        
-        $VerifyUrl = "${VmHostInfoURL}?action=list&ids=${HostId}&details=All"
-        $IsAgentPresent = $false
-        
-        try {
-            [xml]$HostXml = Invoke-RestMethod -Uri $VerifyUrl -Headers $Headers -Method Get -ErrorAction Stop
-            
-            $TrackingMethod = $HostXml.HOST_LIST_OUTPUT.RESPONSE.HOST_LIST.HOST.TRACKING_METHOD
-            $AgentInfo      = $HostXml.HOST_LIST_OUTPUT.RESPONSE.HOST_LIST.HOST.AGENT_INFO
+    Write-Host "[$CurrentProgress/$TotalCount] (Orig #$OrigIndex) Target: $Name (Asset ID: $AssetId | Host ID: $HostId)" -ForegroundColor Green
 
-            if ($TrackingMethod -eq "AGENTS" -or $null -ne $AgentInfo) {
-                $IsAgentPresent = $true
-            }
-        }
-        catch {
-            Write-Host " [WARNING] Could not verify live status via API ($($_.Exception.Message)). Proceeding with caution..." -ForegroundColor Yellow
-        }
+    # -------------------------------------------------------------------
+    # REAL-TIME LIVE API CHECK: Query CSAM Search API for Agent Status
+    # -------------------------------------------------------------------
+    Write-Host " -> Verifying live Agent status via CSAM API (Asset ID: $AssetId)..." -ForegroundColor Gray
+    
+    $IsAgentPresent = $false
+    $CheckPassed    = $false
 
-        # SAFETY BLOCK: If API reports an Agent is linked, SKIP IT!
-        if ($IsAgentPresent) {
-            Write-Host " [SAFETY SKIPPED] Host ID $HostId has an active Cloud Agent attached in Qualys! Skipping purge." -ForegroundColor Red
-            Write-Host "---------------------------------------------------------" -ForegroundColor Gray
-            continue
+    $SearchPayload = "<ServiceRequest><filters><Criteria field=`"id`" operator=`"EQUALS`">$AssetId</Criteria></filters></ServiceRequest>"
+
+    try {
+        $SearchResponse = Invoke-WebRequest -Uri $AmSearchURL `
+                                           -Method "Post" `
+                                           -Headers $Headers `
+                                           -ContentType "text/xml" `
+                                           -Body $SearchPayload `
+                                           -ErrorAction Stop
+
+        [xml]$AssetXml = $SearchResponse.Content
+        $AssetRecord   = $AssetXml.ServiceResponse.data.Asset
+        $AgentInfoNode = $AssetRecord.agentInfo
+
+        # Verify if live CSAM object has an active agentId attached
+        if ($null -ne $AgentInfoNode -and (-not [string]::IsNullOrWhiteSpace($AgentInfoNode.agentId))) {
+            $IsAgentPresent = $true
         }
 
-        # -------------------------------------------------------------------
-        # EXECUTE PURGE
-        # -------------------------------------------------------------------
-        Write-Host " -> API confirmed NO Agent present. Executing True VM Purge..." -ForegroundColor Yellow
+        $CheckPassed = $true
+    }
+    catch {
+        Write-Host " [SAFETY SKIPPED] Live CSAM API search failed ($($_.Exception.Message)). Aborting purge for safety." -ForegroundColor Red
+        Write-Host "---------------------------------------------------------" -ForegroundColor Gray
+        continue
+    }
 
-        $PurgeBody = @{
-            "action"       = "purge"
-            "ids"          = $HostId
-            "echo_request" = "0"
-        }
+    # SAFETY BLOCK: ABORT PURGE IF AGENT IS DETECTED LIVE
+    if ($IsAgentPresent) {
+        Write-Host " [SAFETY SKIPPED] Asset ID $AssetId has an active Cloud Agent live in Qualys! Aborting purge." -ForegroundColor Red
+        Write-Host "---------------------------------------------------------" -ForegroundColor Gray
+        continue
+    }
 
-        try {
-            $PurgeResponse = Invoke-WebRequest -Uri $VmPurgeURL `
-                                               -Method "Post" `
-                                               -Headers $Headers `
-                                               -Body $PurgeBody `
-                                               -ErrorAction Stop
-
-            Write-Host " [VM PURGED] Host ID $HostId ($Name) permanently purged!" -ForegroundColor Green
-        }
-        catch {
-            Write-Host " [PURGE FAILED] Could not purge Host ID $HostId : $($_.Exception.Message)" -ForegroundColor Red
-        }
-
-    # PATH B: Direct AM Asset Delete (Fallback for DNS-only shells missing a VM Host ID)
-    } elseif (-not [string]::IsNullOrWhiteSpace($AssetId)) {
-        Write-Host "[$CurrentLine/$TotalCount] Target: $Name (Asset ID: $AssetId | Host ID: NONE)" -ForegroundColor Yellow
-        Write-Host " -> No Host ID present. Executing Asset Management Delete..." -ForegroundColor Yellow
+    # -------------------------------------------------------------------
+    # EXECUTE ASSET MANAGEMENT DELETE
+    # -------------------------------------------------------------------
+    if ($CheckPassed -and -not $IsAgentPresent) {
+        Write-Host " -> API confirmed NO live Agent present. Executing Asset Management Delete..." -ForegroundColor Yellow
 
         $AmDeletePayload = "<ServiceRequest><filters><Criteria field=`"id`" operator=`"EQUALS`">$AssetId</Criteria></filters></ServiceRequest>"
 
@@ -131,10 +126,10 @@ foreach ($Target in $TargetsToPurge) {
                                                 -Body $AmDeletePayload `
                                                 -ErrorAction Stop
 
-            Write-Host " [AM DELETED] Asset ID $AssetId ($Name) deleted from Asset Management!" -ForegroundColor Green
+            Write-Host " [AM DELETED] Asset ID $AssetId ($Name) successfully deleted!" -ForegroundColor Green
         }
         catch {
-            Write-Host " [DELETE FAILED] Could not delete AM Asset $AssetId : $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host " [AM DELETE FAILED] Could not delete AM Asset $AssetId : $($_.Exception.Message)" -ForegroundColor Red
         }
     }
 
