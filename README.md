@@ -1,5 +1,5 @@
 # Qualys Script Repo
-![Qualys](https://img.shields.io/badge/Qualys-ED1C24?style=flat&logo=qualys&logoColor=white)
+![Qualys](https://img.shields.io/badge/Qualys-ED2E26?style=flat&logo=qualys&logoColor=white)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5391FE?style=flat&logo=iterm2&logoColor=white)
 > Author: Gabriel Wolf
 
