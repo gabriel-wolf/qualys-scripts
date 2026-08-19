@@ -14,3 +14,6 @@ Takes a Qualys export csv ```export.csv``` and parses it to find all (non-Cloud 
 
 ### [`Purge-Duplicates.ps1`](Purge-Duplicates.ps1)
 Uses ```Parse-Duplicates.ps1``` and purges all duplicate (non-Cloud Agent) assets. 
+
+### [`setup-qualys-ports.sh`](setup-qualys-ports.sh)
+Opens up the Quays correlation ports on Linux systems for de-duplication.
