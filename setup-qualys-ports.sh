@@ -9,7 +9,7 @@ fi
 
 PORTS="10001:10005"
 PORTS_DASH="10001-10005"
-SOURCES=("129.118.5.0/24" "10.132.32.70/32")
+SOURCES=("<IP RANGE OF SCANNERS GOES HERE>")
 
 echo "Detecting active Linux firewall subsystem..."
 
