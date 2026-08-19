@@ -1,76 +1,96 @@
 #!/bin/bash
-# Description: Safely opens TCP ports 10001-10005 for Qualys Scanners and Automation Host.
-
-# Ensure script is executed with root privileges
-if [ "$EUID" -ne 0 ]; then
-    echo "Error: Please run as root or with sudo."
-    exit 1
-fi
+# Qualys CAR Script: Idempotent Firewall Config for Agent Correlation Ports (10001-10005)
+# Target IPs: 129.118.5.0/24 (Qualys Scanners)
 
 PORTS="10001:10005"
 PORTS_DASH="10001-10005"
-SOURCES=("<IP RANGE OF SCANNERS GOES HERE>")
+SOURCES=("<SCANNER IP RANGE GOES HERE>")
 
-echo "Detecting active Linux firewall subsystem..."
+echo "Starting firewall configuration for Qualys Agent Correlation Identifier..."
 
-# 1. Firewalld (Oracle Linux, RHEL, CentOS, Rocky, Fedora)
+# 1. Firewalld (Oracle Linux, RHEL, CentOS, Rocky, AlmaLinux, Fedora)
 if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
-    echo "Active firewall manager: firewalld"
+    echo "Detected Firewalld."
     for src in "${SOURCES[@]}"; do
-        echo "Adding rule for source: $src"
-        firewall-cmd --permanent --add-rich-rule="rule family=\"ipv4\" source address=\"$src\" port port=\"$PORTS_DASH\" protocol=\"tcp\" accept"
+        # Check if rule already exists before adding
+        if ! firewall-cmd --query-rich-rule="rule family=\"ipv4\" source address=\"$src\" port port=\"$PORTS_DASH\" protocol=\"tcp\" accept" >/dev/null 2>&1; then
+            firewall-cmd --permanent --add-rich-rule="rule family=\"ipv4\" source address=\"$src\" port port=\"$PORTS_DASH\" protocol=\"tcp\" accept"
+            RELOAD_NEEDED=1
+        fi
     done
-    firewall-cmd --reload
-    echo "Firewalld rules successfully updated and reloaded."
+    if [ "$RELOAD_NEEDED" = "1" ]; then
+        firewall-cmd --reload
+        echo "SUCCESS: Firewalld updated and reloaded."
+    else
+        echo "SUCCESS: Firewalld rules already present."
+    fi
+    exit 0
 
 # 2. UFW (Ubuntu, Debian)
 elif command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-    echo "Active firewall manager: UFW"
+    echo "Detected UFW."
     for src in "${SOURCES[@]}"; do
-        echo "Adding rule for source: $src"
-        ufw allow from "$src" to any port "$PORTS" proto tcp comment 'Qualys Agent Correlation'
+        if ! ufw status | grep -q "$src.*10001:10005"; then
+            ufw allow from "$src" to any port "$PORTS" proto tcp comment 'Qualys Agent Correlation'
+            RELOAD_NEEDED=1
+        fi
     done
-    ufw reload
-    echo "UFW rules successfully updated and reloaded."
+    if [ "$RELOAD_NEEDED" = "1" ]; then
+        ufw reload
+        echo "SUCCESS: UFW updated."
+    else
+        echo "SUCCESS: UFW rules already present."
+    fi
+    exit 0
 
-# 3. Static iptables configuration file (/etc/sysconfig/iptables)
+# 3. Static /etc/sysconfig/iptables (Oracle Linux / RHEL legacy)
 elif [ -f /etc/sysconfig/iptables ]; then
-    echo "Active firewall manager: Static /etc/sysconfig/iptables file"
-    
-    # Insert rules directly above the default REJECT or DROP rule inside the filter table
+    echo "Detected /etc/sysconfig/iptables file."
+    MODIFIED=0
     for src in "${SOURCES[@]}"; do
         RULE="-A INPUT -s $src -p tcp -m state --state NEW -m tcp --dport $PORTS -j ACCEPT"
         if ! grep -qF "$src" /etc/sysconfig/iptables; then
             sed -i "/-A INPUT -j REJECT/i $RULE" /etc/sysconfig/iptables 2>/dev/null || \
             sed -i "/-A INPUT -j DROP/i $RULE" /etc/sysconfig/iptables
+            MODIFIED=1
         fi
     done
     
-    # Restart iptables service to load modified config
-    if systemctl is-active --quiet iptables; then
-        systemctl restart iptables
-    elif service iptables status >/dev/null 2>&1; then
-        service iptables restart
+    if [ "$MODIFIED" = "1" ]; then
+        if systemctl is-active --quiet iptables; then
+            systemctl restart iptables
+        elif service iptables status >/dev/null 2>&1; then
+            service iptables restart
+        fi
+        echo "SUCCESS: /etc/sysconfig/iptables updated and service restarted."
+    else
+        echo "SUCCESS: iptables configuration already up to date."
     fi
-    echo "/etc/sysconfig/iptables updated and service restarted."
+    exit 0
 
-# 4. Fallback to active runtime iptables
+# 4. Fallback Generic Runtime iptables
 elif command -v iptables >/dev/null 2>&1; then
-    echo "Active firewall manager: Generic iptables"
+    echo "Detected generic iptables."
     for src in "${SOURCES[@]}"; do
-        # Insert at the top (position 1) to ensure it precedes any generic DROP/REJECT rules
-        iptables -I INPUT 1 -s "$src" -p tcp --dport "$PORTS" -m comment --comment "Qualys Agent Correlation" -j ACCEPT
+        if ! iptables -C INPUT -s "$src" -p tcp --dport "$PORTS" -j ACCEPT >/dev/null 2>&1; then
+            iptables -I INPUT 1 -s "$src" -p tcp --dport "$PORTS" -m comment --comment "Qualys Agent Correlation" -j ACCEPT
+            MODIFIED=1
+        fi
     done
 
-    # Attempt rule persistence across reboots
-    if command -v netfilter-persistent >/dev/null 2>&1; then
-        netfilter-persistent save
-    elif command -v iptables-save >/dev/null 2>&1 && [ -d /etc/iptables ]; then
-        iptables-save > /etc/iptables/rules.v4
+    if [ "$MODIFIED" = "1" ]; then
+        if command -v netfilter-persistent >/dev/null 2>&1; then
+            netfilter-persistent save
+        elif command -v iptables-save >/dev/null 2>&1 && [ -d /etc/iptables ]; then
+            iptables-save > /etc/iptables/rules.v4
+        fi
+        echo "SUCCESS: Runtime iptables updated."
+    else
+        echo "SUCCESS: iptables rules already present."
     fi
-    echo "iptables runtime rules applied successfully."
+    exit 0
 
 else
-    echo "Error: No active or supported firewall framework was detected."
+    echo "ERROR: No active or supported firewall framework was detected."
     exit 1
 fi
